@@ -1,0 +1,245 @@
+---
+title: "Milestone 4: SQL Pack"
+subtitle: "Individual GA4 BigQuery Analysis"
+author: "Yushan Huang"
+date: "2026-11-16"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    theme: cosmo
+    code-fold: false
+    embed-resources: true
+execute:
+  eval: false
+---
+
+## Introduction
+
+This individual SQL pack examines the public GA4 ecommerce export dataset in BigQuery using GoogleSQL. All eight queries limit scanned event tables to November 1–30, 2020 using `_TABLE_SUFFIX`. The report demonstrates filtering, grouping, aggregation, extraction of nested `event_params`, common table expressions (CTEs), and a LEFT JOIN. Screenshots document the BigQuery outputs, and interpretations distinguish events, user identifiers, sessions, and independent funnel stages.
+
+## Query Coverage
+
+| Query | Topic | Key techniques |
+|:--|:--|:--|
+| 1 | Daily Event Activity | Filtering, grouping, COUNT |
+| 2 | Most Common Events | Filtering, grouping, COUNT DISTINCT |
+| 3 | Daily Users and Events | Grouping, COUNT DISTINCT |
+| 4 | Top Viewed Pages | UNNEST, string_value, grouping |
+| 5 | Daily Session Counts | UNNEST, int_value, CTE, DISTINCT |
+| 6 | Traffic Source Performance | CTE, grouping, COUNTIF |
+| 7 | Daily Purchase Revenue | Filtering, SUM, grouping |
+| 8 | Ecommerce Funnel Stage Participation | Multiple CTEs, LEFT JOIN, COUNT DISTINCT |
+
+## SQL Queries and Interpretations
+
+### Query 1: Daily Event Activity
+
+**Skills demonstrated:** Filtering, grouping, COUNT.
+
+```sql
+SELECT event_date, COUNT(*) AS total_events
+FROM `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20201101' AND '20201130'
+GROUP BY event_date
+ORDER BY event_date;
+```
+
+**BigQuery output**
+
+![Query 1 BigQuery execution screenshot](images/1.png){fig-alt="BigQuery SQL query and result table for query 1" width="100%"}
+
+**Interpretation.** This query counts all recorded events by day during November 2020. For example, November 3 has 61,672 events, compared with 31,272 on November 1, indicating variation in activity. Daily event totals can help monitor traffic patterns. An event count measures interactions, not unique users.
+
+### Query 2: Most Common Events
+
+**Skills demonstrated:** Filtering, grouping, COUNT DISTINCT.
+
+```sql
+SELECT event_name,
+       COUNT(*) AS event_count,
+       COUNT(DISTINCT user_pseudo_id) AS unique_users
+FROM `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20201101' AND '20201130'
+GROUP BY event_name
+ORDER BY event_count DESC
+LIMIT 10;
+```
+
+**BigQuery output**
+
+![Query 2 BigQuery execution screenshot](images/2.png){fig-alt="BigQuery SQL query and result table for query 2" width="100%"}
+
+**Interpretation.** This query ranks event types by frequency and also counts distinct user identifiers for each event. Page views lead the visible results with 453,904 events from 79,181 users, followed by 407,196 user_engagement events. This comparison distinguishes widespread activities from repeated interactions. A user may generate many events of the same type, and user_pseudo_id is not a guaranteed count of people.
+
+### Query 3: Daily Users and Events
+
+**Skills demonstrated:** Grouping, COUNT DISTINCT.
+
+```sql
+SELECT event_date,
+       COUNT(DISTINCT user_pseudo_id) AS daily_users,
+       COUNT(*) AS total_events
+FROM `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20201101' AND '20201130'
+GROUP BY event_date
+ORDER BY event_date;
+```
+
+**BigQuery output**
+
+![Query 3 BigQuery execution screenshot](images/3.png){fig-alt="BigQuery SQL query and result table for query 3" width="100%"}
+
+**Interpretation.** This query reports distinct user identifiers alongside event totals for each day. On November 3, the visible result shows 4,648 users and 61,672 events; on November 1 it shows 2,365 users and 31,272 events. Comparing these measures helps distinguish reach from activity volume. The daily_users field is an event-based distinct identifier count, not necessarily GA4’s official Active Users metric.
+
+### Query 4: Top Viewed Pages
+
+**Skills demonstrated:** UNNEST, string_value, grouping.
+
+```sql
+SELECT
+  (SELECT value.string_value
+   FROM UNNEST(event_params)
+   WHERE key = 'page_location') AS page_url,
+  COUNT(*) AS page_views
+FROM `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20201101' AND '20201130'
+  AND event_name = 'page_view'
+GROUP BY page_url
+ORDER BY page_views DESC
+LIMIT 10;
+```
+
+**BigQuery output**
+
+![Query 4 BigQuery execution screenshot](images/4.png){fig-alt="BigQuery SQL query and result table for query 4" width="100%"}
+
+**Interpretation.** This query extracts page_location from nested GA4 event parameters and ranks URLs by page_view event count. The most viewed URL in the screenshot has 57,668 page views, followed by 29,008. This helps identify heavily visited content for further analysis. Page URLs are truncated in the screenshot, and the counts are views rather than unique visitors.
+
+### Query 5: Daily Session Counts
+
+**Skills demonstrated:** UNNEST, int_value, CTE, DISTINCT.
+
+```sql
+WITH SessionData AS (
+  SELECT DISTINCT
+    event_date,
+    user_pseudo_id,
+    (SELECT value.int_value
+     FROM UNNEST(event_params)
+     WHERE key = 'ga_session_id') AS session_id
+  FROM `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN '20201101' AND '20201130'
+)
+SELECT event_date, COUNT(*) AS total_sessions
+FROM SessionData
+WHERE user_pseudo_id IS NOT NULL
+  AND session_id IS NOT NULL
+GROUP BY event_date
+ORDER BY event_date;
+```
+
+**BigQuery output**
+
+![Query 5 BigQuery execution screenshot](images/5.png){fig-alt="BigQuery SQL query and result table for query 5" width="100%"}
+
+**Interpretation.** This query extracts the integer ga_session_id and deduplicates combinations of date, user identifier, and session ID before counting them. The screenshot shows 2,625 observed sessions on November 1 and 5,356 on November 3. This provides a daily measure of session activity. A session spanning multiple dates can appear on more than one day, so these daily counts should not be summed as a globally deduplicated session total.
+
+### Query 6: Traffic Source Performance
+
+**Skills demonstrated:** CTE, grouping, COUNTIF.
+
+```sql
+WITH TrafficData AS (
+  SELECT
+    COALESCE(traffic_source.source, '(not set)') AS source,
+    user_pseudo_id,
+    event_name
+  FROM `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN '20201101' AND '20201130'
+)
+SELECT source,
+       COUNT(DISTINCT user_pseudo_id) AS total_users,
+       COUNT(*) AS total_events,
+       COUNTIF(event_name = 'purchase') AS purchases
+FROM TrafficData
+GROUP BY source
+ORDER BY total_users DESC
+LIMIT 10;
+```
+
+**BigQuery output**
+
+![Query 6 BigQuery execution screenshot](images/6.png){fig-alt="BigQuery SQL query and result table for query 6" width="100%"}
+
+**Interpretation.** This query compares users, event activity, and purchase events by first-user traffic source. Google leads the visible results with 34,388 users, 517,613 events, and 573 purchase events. The comparison can help prioritize acquisition-channel analysis. The traffic_source.source field is first-user attribution, not session attribution, and purchase events are not necessarily unique orders.
+
+### Query 7: Daily Purchase Revenue
+
+**Skills demonstrated:** Filtering, SUM, grouping.
+
+```sql
+SELECT event_date,
+       COUNT(*) AS purchase_events,
+       ROUND(SUM(COALESCE(ecommerce.purchase_revenue_in_usd, 0)), 2)
+         AS total_revenue_usd
+FROM `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20201101' AND '20201130'
+  AND event_name = 'purchase'
+GROUP BY event_date
+ORDER BY event_date;
+```
+
+**BigQuery output**
+
+![Query 7 BigQuery execution screenshot](images/7.png){fig-alt="BigQuery SQL query and result table for query 7" width="100%"}
+
+**Interpretation.** This query summarizes purchase events and USD purchase revenue by date. The visible results show 14 purchase events and $773 on November 1, compared with 49 purchase events and $4,789 on November 2. This makes daily ecommerce fluctuations easier to monitor. Missing revenue is treated as zero, and these figures do not by themselves establish net revenue or unique transactions.
+
+### Query 8: Ecommerce Funnel Stage Participation
+
+**Skills demonstrated:** Multiple CTEs, LEFT JOIN, COUNT DISTINCT.
+
+```sql
+WITH FunnelEvents AS (
+  SELECT user_pseudo_id, event_name
+  FROM `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN '20201101' AND '20201130'
+    AND event_name IN ('view_item','add_to_cart','begin_checkout','purchase')
+    AND user_pseudo_id IS NOT NULL
+),
+FunnelCounts AS (
+  SELECT event_name, COUNT(DISTINCT user_pseudo_id) AS users
+  FROM FunnelEvents
+  GROUP BY event_name
+),
+FunnelSteps AS (
+  SELECT 1 AS step, 'view_item' AS event_name UNION ALL
+  SELECT 2, 'add_to_cart' UNION ALL
+  SELECT 3, 'begin_checkout' UNION ALL
+  SELECT 4, 'purchase'
+)
+SELECT s.step, s.event_name, COALESCE(f.users,0) AS users
+FROM FunnelSteps AS s
+LEFT JOIN FunnelCounts AS f ON s.event_name = f.event_name
+ORDER BY s.step;
+```
+
+**BigQuery output**
+
+![Query 8 BigQuery execution screenshot](images/8.png){fig-alt="BigQuery SQL query and result table for query 8" width="100%"}
+
+**Interpretation.** This query counts distinct users independently at four ecommerce event stages and uses a LEFT JOIN to retain every defined stage. The screenshot shows 21,440 view_item users, 2,060 add_to_cart users, 4,219 begin_checkout users, and 1,532 purchase users. The higher checkout count than add-to-cart count shows why these values must not be interpreted as a sequential conversion funnel. A true ordered funnel would require user-level event timestamps and stage-order logic.
+
+## Conclusion
+
+The queries demonstrate practical GA4 export analysis across event activity, users, page content, sessions, acquisition sources, revenue, and ecommerce stage participation. In particular, extracting `page_location` as a string and `ga_session_id` as an integer illustrates how nested GA4 parameters require key-specific handling. The resulting metrics should be interpreted according to their counting units, attribution scope, and temporal limitations. Future analysis could build an ordered, session-aware funnel and investigate changes in traffic and revenue over time.
+
+## Appendix
+
+**Dataset:** `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`  
+**Date range:** November 1–30, 2020  
+**GitHub Repository:** [Add your repository URL here](https://github.com/)  
+**GitHub Pages:** [Add your published report URL here](https://pages.github.com/)  
+
+*Replace both placeholder links with your actual published URLs before submitting.*
